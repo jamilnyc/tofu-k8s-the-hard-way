@@ -64,7 +64,7 @@ resource "aws_security_group" "cluster" {
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description = "SSH from operator's current public IP"
+    description = "SSH from operator current public IP"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
