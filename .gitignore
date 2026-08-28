@@ -1,0 +1,6 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+ssh/
+crash.log
+*.tfvars
