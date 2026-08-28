@@ -1,3 +1,4 @@
+# Resolves the latest Debian 12 AMI at apply time, so the AMI ID never goes stale.
 data "aws_ami" "debian_12" {
   most_recent = true
   owners      = ["136693071363"]
@@ -18,6 +19,8 @@ data "aws_ami" "debian_12" {
   }
 }
 
+# The 4 KTHW machines themselves (jumpbox, server, node-0, node-1) — one per
+# entry in var.machines, each with root SSH enabled via cloud-init.
 resource "aws_instance" "machine" {
   for_each = var.machines
 

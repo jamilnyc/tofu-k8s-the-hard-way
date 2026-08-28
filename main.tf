@@ -3,6 +3,7 @@ provider "aws" {
   profile = var.aws_profile
 }
 
+# Isolated network for the cluster, separate from any other VPC in the account.
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
@@ -13,6 +14,7 @@ resource "aws_vpc" "main" {
   }
 }
 
+# Where the 4 instances live; public so each gets a directly reachable public IP.
 resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.subnet_cidr
@@ -24,6 +26,7 @@ resource "aws_subnet" "public" {
   }
 }
 
+# Gives the VPC a path to/from the internet, required for public IP connectivity.
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
@@ -32,6 +35,7 @@ resource "aws_internet_gateway" "main" {
   }
 }
 
+# Directs the subnet's outbound traffic to the internet gateway.
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
@@ -45,11 +49,13 @@ resource "aws_route_table" "public" {
   }
 }
 
+# Wires the route table to the subnet — without this the route table has no effect.
 resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
 
+# Detects the operator's current public IP so the security group can scope SSH to it.
 data "http" "my_ip" {
   url = "https://checkip.amazonaws.com"
 }
@@ -58,6 +64,7 @@ locals {
   my_ip_cidr = "${chomp(data.http.my_ip.response_body)}/32"
 }
 
+# Firewall for all 4 instances: SSH only from the operator, open traffic between cluster members.
 resource "aws_security_group" "cluster" {
   name        = "k8s-hard-way"
   description = "KTHW cluster: SSH from operator IP, all traffic within the group"
