@@ -36,7 +36,7 @@ resource "aws_instance" "machine" {
   }
 
   user_data = templatefile("${path.module}/cloud-init.yaml", {
-    ssh_public_key = tls_private_key.ssh.public_key_openssh
+    ssh_public_key = trimspace(tls_private_key.ssh.public_key_openssh)
   })
 
   tags = {

@@ -1,9 +1,12 @@
 #cloud-config
 ssh_pwauth: false
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-permit-root.conf
+    content: |
+      PermitRootLogin yes
 runcmd:
   - mkdir -p /root/.ssh
   - chmod 700 /root/.ssh
   - echo "${ssh_public_key}" >> /root/.ssh/authorized_keys
   - chmod 600 /root/.ssh/authorized_keys
-  - sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - systemctl restart ssh
