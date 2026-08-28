@@ -49,3 +49,44 @@ resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
+
+data "http" "my_ip" {
+  url = "https://checkip.amazonaws.com"
+}
+
+locals {
+  my_ip_cidr = "${chomp(data.http.my_ip.response_body)}/32"
+}
+
+resource "aws_security_group" "cluster" {
+  name        = "k8s-hard-way"
+  description = "KTHW cluster: SSH from operator IP, all traffic within the group"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "SSH from operator's current public IP"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [local.my_ip_cidr]
+  }
+
+  ingress {
+    description = "All traffic between cluster members"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    self        = true
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "k8s-hard-way"
+  }
+}
