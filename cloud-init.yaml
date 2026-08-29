@@ -32,6 +32,31 @@ write_files:
     content: |
       ${indent(6, setup_script)}
 %{ endif }
+%{ if machines_txt != "" }
+  # Only present on the jumpbox (see instances.tf): the KTHW docs use this
+  # file from there to loop over the server and worker nodes for ssh/scp.
+  - path: /root/machines.txt
+    content: |
+      ${indent(6, machines_txt)}
+%{ endif }
+%{ if ssh_private_key != "" }
+  # Only present on the jumpbox: the same key already trusted by every node's
+  # authorized_keys (see runcmd below), so the jumpbox can ssh/scp to the
+  # server and worker nodes as root -- required by hosts-setup.sh. Mode 0600
+  # up front since sshd refuses a key file any group/world bits can touch.
+  - path: /root/.ssh/id_ed25519
+    permissions: '0600'
+    content: |
+      ${indent(6, ssh_private_key)}
+%{ endif }
+%{ if hosts_setup_script != "" }
+  # Only present on the jumpbox; needs machines.txt and the private key
+  # above, so it's installed here and run last in runcmd below.
+  - path: /root/hosts-setup.sh
+    permissions: '0755'
+    content: |
+      ${indent(6, hosts_setup_script)}
+%{ endif }
 runcmd:
   - mkdir -p /root/.ssh
   - chmod 700 /root/.ssh
@@ -42,4 +67,10 @@ runcmd:
   # Runs unattended, so log to a file rather than relying on console output;
   # a non-zero exit here logs a cloud-init warning but doesn't fail the boot.
   - bash /root/setup.sh > /var/log/setup.log 2>&1
+%{ endif }
+%{ if hosts_setup_script != "" }
+  # Runs last: the other 3 nodes are booting in parallel and may still be
+  # mid-boot, so this waits for each one's ssh to come up (see
+  # hosts-setup.sh) before touching hostnames/etc.
+  - bash /root/hosts-setup.sh > /var/log/hosts-setup.log 2>&1
 %{ endif }

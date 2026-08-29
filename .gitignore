@@ -5,3 +5,4 @@ ssh/
 crash.log
 *.tfvars
 plan.out
+machines.txt

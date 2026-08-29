@@ -1,0 +1,3 @@
+%{ for name, ip in machines ~}
+${ip} ${name}.kubernetes.local ${name}${lookup(pod_cidrs, name, "") != "" ? " ${pod_cidrs[name]}" : ""}
+%{ endfor ~}

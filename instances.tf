@@ -44,9 +44,17 @@ resource "aws_instance" "machine" {
   # variable (not read via a nested templatefile()) so its own "${...}" bash
   # expansions are never mistaken for HCL interpolation by the
   # templatefile() engine below.
+  # machines_txt and ssh_private_key are only meaningful on the jumpbox: it's
+  # the machine the KTHW docs ssh/scp to the other 3 nodes from (hosts-setup.sh),
+  # which needs both /root/machines.txt to loop over and this cluster's private
+  # key to actually authenticate as root on those nodes -- the other 3 only
+  # ever receive inbound connections, so they don't need a copy.
   user_data = templatefile("${path.module}/cloud-init.yaml", {
-    ssh_public_key = trimspace(tls_private_key.ssh.public_key_openssh)
-    setup_script   = fileexists("${path.module}/${each.key}-setup.sh") ? file("${path.module}/${each.key}-setup.sh") : ""
+    ssh_public_key     = trimspace(tls_private_key.ssh.public_key_openssh)
+    setup_script       = fileexists("${path.module}/${each.key}-setup.sh") ? file("${path.module}/${each.key}-setup.sh") : ""
+    machines_txt       = each.key == "jumpbox" ? local_file.machines_txt.content : ""
+    ssh_private_key    = each.key == "jumpbox" ? tls_private_key.ssh.private_key_openssh : ""
+    hosts_setup_script = each.key == "jumpbox" ? file("${path.module}/hosts-setup.sh") : ""
   })
 
   tags = {
