@@ -1,9 +1,28 @@
 #cloud-config
 ssh_pwauth: false
+# Debian's stock cloud image ships disable_root: true, which makes cloud-init's
+# own ssh module wrap the AWS-injected metadata key in a forced `command=` that
+# prints "Please login as user ... rather than root" and disconnects. sshd
+# matches the first authorized_keys entry for a given key, so that wrapper
+# entry always wins over the plain one runcmd appends below. Disabling it here
+# stops cloud-init from installing the wrapper at all.
+disable_root: false
 write_files:
   - path: /etc/ssh/sshd_config.d/99-permit-root.conf
     content: |
       PermitRootLogin yes
+  # Debian's default root shell has no color/prompt customization; this makes
+  # an interactive root session (which is all we get on these boxes) legible.
+  - path: /root/.bashrc
+    append: true
+    content: |
+
+      # Colored prompt: user@host in green, current directory in blue.
+      export PS1='\[\e[32m\]\u@\h\[\e[0m\]:\[\e[34m\]\w\[\e[0m\]\$ '
+      alias ls='ls --color=auto'
+      alias grep='grep --color=auto'
+      alias egrep='egrep --color=auto'
+      alias fgrep='fgrep --color=auto'
 runcmd:
   - mkdir -p /root/.ssh
   - chmod 700 /root/.ssh
