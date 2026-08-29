@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
 #
-# Runs the "Set Up The Jumpbox" steps from Kubernetes The Hard Way, in order:
+# Runs the "Set Up The Jumpbox" and "Provisioning a CA and Generating TLS
+# Certificates" steps from Kubernetes The Hard Way, in order:
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/02-jumpbox.md
+# https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/04-certificate-authority.md
 #
 # Intended to be run as root on the jumpbox instance itself (SSH in first).
 # Runs unattended via cloud-init with no console attached, so every step
-# logs when it starts and how it ended (see run_step below).
+# logs when it starts and how it ended (see run_step below). cloud-init runs
+# this after hosts-setup.sh (see cloud-init.yaml), since the certificate
+# distribution steps below need to `ssh root@node-0` etc. by hostname.
 
 set -euo pipefail
+
+# Same reasoning as hosts-setup.sh: these are freshly created instances the
+# jumpbox has never talked to before, so every connection trips an
+# interactive host-key prompt; accept-new trusts it on first use instead of
+# hanging a script with no console attached.
+SSH_OPTS=(-n -o StrictHostKeyChecking=accept-new)
 
 # Logs a start/end line around a step so unattended runs (piped to a log
 # file by cloud-init) show what ran, how long it took, and whether it
@@ -98,6 +108,63 @@ verify_kubectl() {
   kubectl version --client
 }
 
+# Every non-CA certificate this cluster needs; each name doubles as the
+# ca.conf section that supplies its identity (CN/O) and extensions.
+CERTS=(
+  "admin" "node-0" "node-1"
+  "kube-proxy" "kube-scheduler"
+  "kube-controller-manager"
+  "kube-api-server"
+  "service-accounts"
+)
+
+generate_ca() {
+  openssl genrsa -out ca.key 4096
+  openssl req -x509 -new -sha512 -noenc \
+    -key ca.key -days 3653 \
+    -config ca.conf \
+    -out ca.crt
+}
+
+generate_certs() {
+  for i in "${CERTS[@]}"; do
+    openssl genrsa -out "${i}.key" 4096
+
+    openssl req -new -key "${i}.key" -sha256 \
+      -config "ca.conf" -section "${i}" \
+      -out "${i}.csr"
+
+    openssl x509 -req -days 3653 -in "${i}.csr" \
+      -copy_extensions copyall \
+      -sha256 -CA "ca.crt" \
+      -CAkey "ca.key" \
+      -CAcreateserial \
+      -out "${i}.crt"
+  done
+}
+
+distribute_worker_certs() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" mkdir -p /var/lib/kubelet/
+
+    scp -o StrictHostKeyChecking=accept-new ca.crt "root@${host}:/var/lib/kubelet/"
+
+    scp -o StrictHostKeyChecking=accept-new "${host}.crt" \
+      "root@${host}:/var/lib/kubelet/kubelet.crt"
+
+    scp -o StrictHostKeyChecking=accept-new "${host}.key" \
+      "root@${host}:/var/lib/kubelet/kubelet.key"
+  done
+}
+
+distribute_server_certs() {
+  scp -o StrictHostKeyChecking=accept-new \
+    ca.key ca.crt \
+    kube-api-server.key kube-api-server.crt \
+    service-accounts.key service-accounts.crt \
+    root@server:~/
+}
+
 run_step "install command line utilities" install_packages
 # cloud-init runs runcmd from /, not /root, so without this the repo clones
 # to /kubernetes-the-hard-way instead of /root/kubernetes-the-hard-way.
@@ -116,3 +183,8 @@ run_step "remove archive files" cleanup_archives
 run_step "make binaries executable" make_executable
 run_step "install kubectl to /usr/local/bin" install_kubectl
 run_step "verify kubectl installation" verify_kubectl
+
+run_step "generate certificate authority" generate_ca
+run_step "generate and sign component certificates" generate_certs
+run_step "distribute certs to node-0 and node-1" distribute_worker_certs
+run_step "distribute certs to server" distribute_server_certs

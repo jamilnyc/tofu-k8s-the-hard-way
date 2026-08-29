@@ -51,7 +51,7 @@ write_files:
 %{ endif }
 %{ if hosts_setup_script != "" }
   # Only present on the jumpbox; needs machines.txt and the private key
-  # above, so it's installed here and run last in runcmd below.
+  # above, so it's installed here and run before setup.sh in runcmd below.
   - path: /root/hosts-setup.sh
     permissions: '0755'
     content: |
@@ -63,14 +63,15 @@ runcmd:
   - echo "${ssh_public_key}" >> /root/.ssh/authorized_keys
   - chmod 600 /root/.ssh/authorized_keys
   - systemctl restart ssh
+%{ if hosts_setup_script != "" }
+  # Runs before setup.sh: the other 3 nodes are booting in parallel and may
+  # still be mid-boot, so this waits for each one's ssh to come up (see
+  # hosts-setup.sh) and gets hostnames resolvable in /etc/hosts -- setup.sh's
+  # certificate distribution below needs to `ssh root@node-0` etc. by name.
+  - bash /root/hosts-setup.sh > /var/log/hosts-setup.log 2>&1
+%{ endif }
 %{ if setup_script != "" }
   # Runs unattended, so log to a file rather than relying on console output;
   # a non-zero exit here logs a cloud-init warning but doesn't fail the boot.
   - bash /root/setup.sh > /var/log/setup.log 2>&1
-%{ endif }
-%{ if hosts_setup_script != "" }
-  # Runs last: the other 3 nodes are booting in parallel and may still be
-  # mid-boot, so this waits for each one's ssh to come up (see
-  # hosts-setup.sh) before touching hostnames/etc.
-  - bash /root/hosts-setup.sh > /var/log/hosts-setup.log 2>&1
 %{ endif }
