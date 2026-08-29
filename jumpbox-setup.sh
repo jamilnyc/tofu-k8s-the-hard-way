@@ -30,6 +30,10 @@ install_packages() {
   apt-get -y install wget curl vim openssl git
 }
 
+enter_root_home() {
+  cd /root
+}
+
 clone_repo() {
   if [ ! -d kubernetes-the-hard-way ]; then
     git clone --depth 1 \
@@ -95,6 +99,9 @@ verify_kubectl() {
 }
 
 run_step "install command line utilities" install_packages
+# cloud-init runs runcmd from /, not /root, so without this the repo clones
+# to /kubernetes-the-hard-way instead of /root/kubernetes-the-hard-way.
+run_step "enter /root" enter_root_home
 run_step "clone kubernetes-the-hard-way repo" clone_repo
 run_step "enter kubernetes-the-hard-way directory" enter_repo_dir
 
