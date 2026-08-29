@@ -4,3 +4,4 @@
 ssh/
 crash.log
 *.tfvars
+plan.out

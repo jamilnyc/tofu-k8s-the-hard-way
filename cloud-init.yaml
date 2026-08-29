@@ -23,9 +23,23 @@ write_files:
       alias grep='grep --color=auto'
       alias egrep='egrep --color=auto'
       alias fgrep='fgrep --color=auto'
+%{ if setup_script != "" }
+  # Present only for machines with a "<name>-setup.sh" file in the repo root
+  # (see instances.tf); installed here so runcmd below can execute it on
+  # first boot.
+  - path: /root/setup.sh
+    permissions: '0755'
+    content: |
+      ${indent(6, setup_script)}
+%{ endif }
 runcmd:
   - mkdir -p /root/.ssh
   - chmod 700 /root/.ssh
   - echo "${ssh_public_key}" >> /root/.ssh/authorized_keys
   - chmod 600 /root/.ssh/authorized_keys
   - systemctl restart ssh
+%{ if setup_script != "" }
+  # Runs unattended, so log to a file rather than relying on console output;
+  # a non-zero exit here logs a cloud-init warning but doesn't fail the boot.
+  - bash /root/setup.sh > /var/log/setup.log 2>&1
+%{ endif }

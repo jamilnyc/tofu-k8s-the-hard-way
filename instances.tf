@@ -38,8 +38,15 @@ resource "aws_instance" "machine" {
     volume_type = "gp3"
   }
 
+  # Any machine picks up a setup script automatically by convention: a file
+  # named "<machine-name>-setup.sh" in the repo root (e.g. jumpbox-setup.sh
+  # for the "jumpbox" entry in var.machines). It's passed as a template
+  # variable (not read via a nested templatefile()) so its own "${...}" bash
+  # expansions are never mistaken for HCL interpolation by the
+  # templatefile() engine below.
   user_data = templatefile("${path.module}/cloud-init.yaml", {
     ssh_public_key = trimspace(tls_private_key.ssh.public_key_openssh)
+    setup_script   = fileexists("${path.module}/${each.key}-setup.sh") ? file("${path.module}/${each.key}-setup.sh") : ""
   })
 
   tags = {
