@@ -12,6 +12,7 @@
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/07-bootstrapping-etcd.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/08-bootstrapping-kubernetes-controllers.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/09-bootstrapping-kubernetes-workers.md
+# https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/10-configuring-kubectl.md
 #
 # The etcd steps are the doc's first ones that must run ON the server
 # machine rather than the jumpbox. Rather than giving server its own
@@ -722,6 +723,41 @@ verify_worker_nodes_registered() {
     'kubectl get nodes --kubeconfig admin.kubeconfig'
 }
 
+# Unlike every other kubeconfig generated so far, this one omits
+# --kubeconfig entirely -- kubectl then reads/writes the default location,
+# ~/.kube/config, which is what lets plain `kubectl ...` (no flags) work
+# from the jumpbox afterwards instead of always needing --kubeconfig
+# admin.kubeconfig. Also unlike generate_admin_kubeconfig, it points at
+# server.kubernetes.local rather than 127.0.0.1: this one's meant to be
+# used from the jumpbox as a remote client, not locally on server.
+configure_kubectl_for_remote_access() {
+  kubectl config set-cluster kubernetes-the-hard-way \
+    --certificate-authority=ca.crt \
+    --embed-certs=true \
+    --server=https://server.kubernetes.local:6443
+
+  kubectl config set-credentials admin \
+    --client-certificate=admin.crt \
+    --client-key=admin.key
+
+  kubectl config set-context kubernetes-the-hard-way \
+    --cluster=kubernetes-the-hard-way \
+    --user=admin
+
+  kubectl config use-context kubernetes-the-hard-way
+}
+
+# Confirms `kubectl` now works bare (client+server version) using the
+# default kubeconfig just written above, rather than the explicit
+# --kubeconfig admin.kubeconfig flag every earlier verification step needed.
+verify_kubectl_version() {
+  kubectl version
+}
+
+verify_kubectl_get_nodes() {
+  kubectl get nodes
+}
+
 run_step "install command line utilities" install_packages
 # cloud-init runs runcmd from /, not /root, so without this the repo clones
 # to /kubernetes-the-hard-way instead of /root/kubernetes-the-hard-way.
@@ -793,3 +829,10 @@ run_step "configure kube-proxy on workers" configure_kube_proxy_on_workers
 run_step "start worker services" start_worker_services
 run_step "verify kubelet is active on workers" verify_kubelet_active_on_workers
 run_step "verify worker nodes registered with cluster" verify_worker_nodes_registered
+
+# Doc 10 opens with the same curl --cacert ca.crt .../version check already
+# run and verified above (verify_control_plane_from_jumpbox), so it's not
+# repeated here -- picking up from the kubeconfig generation onward.
+run_step "configure kubectl for remote access" configure_kubectl_for_remote_access
+run_step "verify kubectl version against cluster" verify_kubectl_version
+run_step "verify kubectl get nodes" verify_kubectl_get_nodes
