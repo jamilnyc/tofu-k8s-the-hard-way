@@ -2,12 +2,23 @@
 #
 # Runs the "Set Up The Jumpbox", "Provisioning a CA and Generating TLS
 # Certificates", "Generating Kubernetes Configuration Files for
-# Authentication", and "Generating the Data Encryption Config and Key"
-# steps from Kubernetes The Hard Way, in order:
+# Authentication", "Generating the Data Encryption Config and Key", and
+# "Bootstrapping the etcd Cluster" steps from Kubernetes The Hard Way, in
+# order:
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/02-jumpbox.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/04-certificate-authority.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/05-kubernetes-configuration-files.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/06-data-encryption-keys.md
+# https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/07-bootstrapping-etcd.md
+#
+# The etcd steps are the doc's first ones that must run ON the server
+# machine rather than the jumpbox. Rather than giving server its own
+# independently-timed setup.sh/cloud-init (which would race jumpbox to
+# finish -- see the "server-setup.sh + sleep" idea considered and rejected
+# in favor of this), jumpbox stays the one orchestrator: it scp's the etcd
+# binaries and unit file over exactly like it already does for certs and
+# kubeconfigs, then ssh's in to run the remaining install/configure/start
+# commands itself, in order, right after. No race, no separate script.
 #
 # Intended to be run as root on the jumpbox instance itself (SSH in first).
 # Runs unattended via cloud-init with no console attached, so every step
@@ -330,6 +341,56 @@ distribute_encryption_config() {
   scp -o StrictHostKeyChecking=accept-new encryption-config.yaml root@server:~/
 }
 
+# etcd runs on server, not the jumpbox, so the binaries/unit file have to
+# land there before any of the remaining steps can run against them.
+distribute_etcd_binaries() {
+  scp -o StrictHostKeyChecking=accept-new \
+    downloads/controller/etcd \
+    downloads/client/etcdctl \
+    units/etcd.service \
+    root@server:~/
+}
+
+# etcd.service's ExecStart expects the binaries on PATH at /usr/local/bin,
+# matching where kubectl and the other components already get installed.
+install_etcd_binaries_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server 'mv etcd etcdctl /usr/local/bin/'
+}
+
+# /etc/etcd holds the CA and kube-api-server cert/key etcd.service points
+# at for peer/client TLS; /var/lib/etcd is etcd's data directory, chmod 700
+# since it will hold the cluster's actual data once running.
+configure_etcd_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server '
+    mkdir -p /etc/etcd /var/lib/etcd
+    chmod 700 /var/lib/etcd
+    cp ca.crt kube-api-server.key kube-api-server.crt /etc/etcd/
+  '
+}
+
+# systemd only manages units it finds in /etc/systemd/system, so the file
+# scp'd to $HOME above has to move there before it's usable.
+install_etcd_unit_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server 'mv etcd.service /etc/systemd/system/'
+}
+
+# daemon-reload picks up the unit file just installed; enable makes etcd
+# survive a reboot, start actually brings it up now.
+start_etcd_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server '
+    systemctl daemon-reload
+    systemctl enable etcd
+    systemctl start etcd
+  '
+}
+
+# Confirms etcd actually came up healthy as a single-node cluster, rather
+# than trusting a "systemctl start" exit code that only means the process
+# launched -- a bad cert path or config would still show up here.
+verify_etcd_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server etcdctl member list
+}
+
 run_step "install command line utilities" install_packages
 # cloud-init runs runcmd from /, not /root, so without this the repo clones
 # to /kubernetes-the-hard-way instead of /root/kubernetes-the-hard-way.
@@ -365,3 +426,10 @@ run_step "distribute kubeconfigs to server" distribute_control_kubeconfigs
 run_step "generate data encryption key" generate_encryption_key
 run_step "generate encryption config" generate_encryption_config
 run_step "distribute encryption config to server" distribute_encryption_config
+
+run_step "distribute etcd binaries and unit file to server" distribute_etcd_binaries
+run_step "install etcd binaries on server" install_etcd_binaries_on_server
+run_step "configure etcd on server" configure_etcd_on_server
+run_step "install etcd systemd unit on server" install_etcd_unit_on_server
+run_step "start etcd on server" start_etcd_on_server
+run_step "verify etcd cluster membership" verify_etcd_on_server
