@@ -34,6 +34,21 @@
 
 set -euo pipefail
 
+# cloud-init's runcmd runs this as a systemd service, not a login shell, so
+# nothing exports $HOME -- it's empty by default. That's invisible for most
+# of this script since every kubeconfig generated elsewhere passes an
+# explicit --kubeconfig=..., but configure_kubectl_for_remote_access
+# deliberately omits that flag so kubectl falls back to its default config
+# path. With $HOME empty, Go's filepath.Join("", ".kube", "config") drops
+# the empty first element and returns the *relative* path ".kube/config",
+# which then resolved against this script's cwd at the time (see
+# enter_repo_dir) instead of /root -- so the config silently landed at
+# kubernetes-the-hard-way/.kube/config, invisible to any real login shell
+# expecting the usual /root/.kube/config. Exporting HOME here makes every
+# $HOME-relative path in this script (kubectl's default config included)
+# resolve the same way it would in an interactive root session.
+export HOME=/root
+
 # Same reasoning as hosts-setup.sh: these are freshly created instances the
 # jumpbox has never talked to before, so every connection trips an
 # interactive host-key prompt; accept-new trusts it on first use instead of
