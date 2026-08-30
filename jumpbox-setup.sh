@@ -13,6 +13,7 @@
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/08-bootstrapping-kubernetes-controllers.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/09-bootstrapping-kubernetes-workers.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/10-configuring-kubectl.md
+# https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/11-pod-network-routes.md
 #
 # The etcd steps are the doc's first ones that must run ON the server
 # machine rather than the jumpbox. Rather than giving server its own
@@ -762,6 +763,58 @@ verify_kubectl_get_nodes() {
   kubectl get nodes
 }
 
+# Sets globals (no `local`, same convention as ARCH below) rather than
+# returning them, since add_pod_routes_on_* below all need them. Read from
+# the absolute /root/machines.txt -- the copy cloud-init wrote there (see
+# machines.tf/cloud-init.yaml) -- rather than a relative "machines.txt",
+# since cwd is /root/kubernetes-the-hard-way for the rest of this script
+# (see enter_repo_dir) and nothing copies the file in there.
+gather_pod_route_vars() {
+  SERVER_IP=$(grep server /root/machines.txt | cut -d " " -f 1)
+  NODE_0_IP=$(grep node-0 /root/machines.txt | cut -d " " -f 1)
+  NODE_0_SUBNET=$(grep node-0 /root/machines.txt | cut -d " " -f 4)
+  NODE_1_IP=$(grep node-1 /root/machines.txt | cut -d " " -f 1)
+  NODE_1_SUBNET=$(grep node-1 /root/machines.txt | cut -d " " -f 4)
+}
+
+# Pods on different nodes still can't reach each other at this point: the
+# per-host bridge CNI plugin (doc 09) only wires up local pod networking, so
+# each node's Pod CIDR is unreachable from anywhere else in the cluster
+# until something adds a route to it. server itself never runs pods, but
+# the API server proxies to the kubelet API on both workers (the RBAC grant
+# from doc 08, used by `kubectl logs`/`exec`), so it needs a route to both
+# worker subnets.
+add_pod_routes_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server "
+    ip route add ${NODE_0_SUBNET} via ${NODE_0_IP}
+    ip route add ${NODE_1_SUBNET} via ${NODE_1_IP}
+  "
+}
+
+# node-0 only needs a route to node-1's subnet -- its own subnet is already
+# reachable locally via its own CNI bridge, no route required.
+add_pod_routes_on_node0() {
+  ssh "${SSH_OPTS[@]}" root@node-0 "
+    ip route add ${NODE_1_SUBNET} via ${NODE_1_IP}
+  "
+}
+
+# Mirror of add_pod_routes_on_node0 for the other worker.
+add_pod_routes_on_node1() {
+  ssh "${SSH_OPTS[@]}" root@node-1 "
+    ip route add ${NODE_0_SUBNET} via ${NODE_0_IP}
+  "
+}
+
+# Confirms the routes actually landed in each host's kernel routing table,
+# rather than trusting the ssh commands' exit codes alone -- same reasoning
+# as verify_etcd_on_server/verify_kube_apiserver_active earlier.
+verify_pod_routes() {
+  ssh "${SSH_OPTS[@]}" root@server ip route
+  ssh "${SSH_OPTS[@]}" root@node-0 ip route
+  ssh "${SSH_OPTS[@]}" root@node-1 ip route
+}
+
 run_step "install command line utilities" install_packages
 # cloud-init runs runcmd from /, not /root, so without this the repo clones
 # to /kubernetes-the-hard-way instead of /root/kubernetes-the-hard-way.
@@ -840,3 +893,9 @@ run_step "verify worker nodes registered with cluster" verify_worker_nodes_regis
 run_step "configure kubectl for remote access" configure_kubectl_for_remote_access
 run_step "verify kubectl version against cluster" verify_kubectl_version
 run_step "verify kubectl get nodes" verify_kubectl_get_nodes
+
+run_step "gather pod network route variables from machines.txt" gather_pod_route_vars
+run_step "add pod network routes on server" add_pod_routes_on_server
+run_step "add pod network routes on node-0" add_pod_routes_on_node0
+run_step "add pod network routes on node-1" add_pod_routes_on_node1
+run_step "verify pod network routes" verify_pod_routes
