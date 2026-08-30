@@ -76,22 +76,22 @@ Remote state in S3 with DynamoDB locking:
 ```hcl
 terraform {
   backend "s3" {
-    bucket         = "jamil-personal-terraform-state"
+    bucket         = "CHANGEME-terraform-state-bucket"
     key            = "k8s-hard-way.tfstate"
     region         = "us-east-1"
     dynamodb_table = "terraform-state-lock"
     encrypt        = true
-    profile        = "terraform-personal"
+    profile        = "CHANGEME-aws-profile"
   }
 }
 ```
 
-The `terraform-personal` AWS profile's IAM user has `AdministratorAccess`, so
+The `CHANGEME-aws-profile` AWS profile's IAM user has `AdministratorAccess`, so
 no additional bucket/table permissions need to be granted.
 
 ## Provider / auth
 
-`provider "aws" { region = var.region; profile = "terraform-personal" }`.
+`provider "aws" { region = var.region; profile = "CHANGEME-aws-profile" }`.
 Region defaults to `us-east-1`.
 
 ## File layout

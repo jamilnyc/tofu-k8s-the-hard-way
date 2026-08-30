@@ -10,11 +10,21 @@ rationale.
 ## Prerequisites
 
 - OpenTofu >= 1.7
-- An AWS CLI profile named `terraform-personal` with credentials that can
-  create VPC/EC2/IAM-adjacent resources (this project assumes
-  `AdministratorAccess`)
-- Pre-existing S3 bucket `jamil-personal-terraform-state` and DynamoDB table
-  `terraform-state-lock` in `us-east-1` (used for remote state/locking)
+- An AWS CLI profile with credentials that can create VPC/EC2/IAM-adjacent
+  resources (this project assumes `AdministratorAccess`)
+- A pre-existing S3 bucket and DynamoDB table for remote state/locking
+
+## Setup
+
+`backend.tf` can't use variables (Terraform backend blocks are evaluated
+before any variables are resolved), so before running `tofu init`, edit it
+and replace the three `CHANGEME-*` placeholders with your own S3 bucket,
+DynamoDB lock table, and AWS CLI profile name.
+
+By default `var.aws_profile` (see `variables.tf`) is `"default"`, matching
+the AWS CLI's own default profile name — override it (`-var
+aws_profile=your-profile`) if you use a named profile for the provider
+itself, separately from the backend's `profile` above.
 
 ## Usage
 

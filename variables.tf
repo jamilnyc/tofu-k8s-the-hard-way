@@ -7,7 +7,7 @@ variable "aws_region" {
 variable "aws_profile" {
   description = "AWS CLI profile to use for authentication"
   type        = string
-  default     = "terraform-personal"
+  default     = "default"
 }
 
 variable "instance_type" {
