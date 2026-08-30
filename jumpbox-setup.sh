@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
 # Runs the "Set Up The Jumpbox", "Provisioning a CA and Generating TLS
-# Certificates", and "Generating Kubernetes Configuration Files for
-# Authentication" steps from Kubernetes The Hard Way, in order:
+# Certificates", "Generating Kubernetes Configuration Files for
+# Authentication", and "Generating the Data Encryption Config and Key"
+# steps from Kubernetes The Hard Way, in order:
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/02-jumpbox.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/04-certificate-authority.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/05-kubernetes-configuration-files.md
+# https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/06-data-encryption-keys.md
 #
 # Intended to be run as root on the jumpbox instance itself (SSH in first).
 # Runs unattended via cloud-init with no console attached, so every step
@@ -39,7 +41,8 @@ run_step() {
 
 install_packages() {
   apt-get update
-  apt-get -y install wget curl vim openssl git
+  # gettext-base provides envsubst, needed to render encryption-config.yaml.
+  apt-get -y install wget curl vim openssl git gettext-base
 }
 
 enter_root_home() {
@@ -308,6 +311,25 @@ distribute_control_kubeconfigs() {
     root@server:~/
 }
 
+# Not exported into a variable of its own since it's only ever read back out
+# via $ENCRYPTION_KEY by envsubst below -- exporting it is what makes it
+# visible to that child process at all (see the earlier envsubst debugging:
+# a non-exported ENCRYPTION_KEY is invisible to envsubst even though $ENCRYPTION_KEY
+# still echoes fine in this shell).
+generate_encryption_key() {
+  export ENCRYPTION_KEY
+  ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
+}
+
+generate_encryption_config() {
+  envsubst <configs/encryption-config.yaml \
+    >encryption-config.yaml
+}
+
+distribute_encryption_config() {
+  scp -o StrictHostKeyChecking=accept-new encryption-config.yaml root@server:~/
+}
+
 run_step "install command line utilities" install_packages
 # cloud-init runs runcmd from /, not /root, so without this the repo clones
 # to /kubernetes-the-hard-way instead of /root/kubernetes-the-hard-way.
@@ -339,3 +361,7 @@ run_step "generate kube-scheduler kubeconfig" generate_kube_scheduler_kubeconfig
 run_step "generate admin kubeconfig" generate_admin_kubeconfig
 run_step "distribute kubeconfigs to node-0 and node-1" distribute_worker_kubeconfigs
 run_step "distribute kubeconfigs to server" distribute_control_kubeconfigs
+
+run_step "generate data encryption key" generate_encryption_key
+run_step "generate encryption config" generate_encryption_config
+run_step "distribute encryption config to server" distribute_encryption_config
