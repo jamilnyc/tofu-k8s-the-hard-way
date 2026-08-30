@@ -690,9 +690,27 @@ start_worker_services() {
 
 # Confirms kubelet actually came up on each worker rather than trusting
 # "systemctl start" launched it -- same reasoning as verify_kube_apiserver_active.
+# kubelet can sit in "activating" for a few seconds after systemctl start
+# returns (containerd/CNI checks, first registration with the API server),
+# and that delay isn't fixed -- so this polls is-active instead of sleeping
+# a guessed duration, same condition-based-waiting pattern as wait_for_ssh
+# in hosts-setup.sh. Fails loudly with the last-seen status if it never
+# reaches active within the timeout, rather than racing ahead regardless.
 verify_kubelet_active_on_workers() {
   for host in node-0 node-1; do
-    ssh "${SSH_OPTS[@]}" "root@${host}" systemctl is-active kubelet
+    local status
+    status="unknown"
+    for _ in $(seq 1 12); do
+      status=$(ssh "${SSH_OPTS[@]}" "root@${host}" systemctl is-active kubelet || true)
+      [ "${status}" = "active" ] && break
+      sleep 5
+    done
+
+    echo "${host}: kubelet ${status}"
+    if [ "${status}" != "active" ]; then
+      echo "kubelet on ${host} did not become active in time (last status: ${status})" >&2
+      return 1
+    fi
   done
 }
 
