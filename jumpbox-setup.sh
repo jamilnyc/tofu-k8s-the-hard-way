@@ -522,14 +522,18 @@ verify_control_plane_from_jumpbox() {
 }
 
 # The bridge CNI config and kubelet config are per-host: each worker gets
-# its own slice of the pod CIDR range from machines.txt (field 4), so the
-# SUBNET placeholder in each template has to be filled in before that
-# host's copy is sent -- sed re-renders both files fresh on every loop
-# iteration so node-0 and node-1 never get each other's subnet.
+# its own slice of the pod CIDR range from /root/machines.txt (field 4) --
+# the absolute path matters here: cwd is /root/kubernetes-the-hard-way for
+# the rest of this script (see enter_repo_dir) and nothing ever copies
+# machines.txt in there, so a bare "machines.txt" would resolve to a file
+# that doesn't exist. The SUBNET placeholder in each template has to be
+# filled in before that host's copy is sent -- sed re-renders both files
+# fresh on every loop iteration so node-0 and node-1 never get each other's
+# subnet.
 distribute_worker_node_configs() {
   for host in node-0 node-1; do
     local subnet
-    subnet=$(grep "${host}" machines.txt | cut -d " " -f 4)
+    subnet=$(grep "${host}" /root/machines.txt | cut -d " " -f 4)
 
     sed "s|SUBNET|${subnet}|g" configs/10-bridge.conf >10-bridge.conf
     sed "s|SUBNET|${subnet}|g" configs/kubelet-config.yaml >kubelet-config.yaml
