@@ -10,6 +10,7 @@
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/05-kubernetes-configuration-files.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/06-data-encryption-keys.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/07-bootstrapping-etcd.md
+# https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/08-bootstrapping-kubernetes-controllers.md
 #
 # The etcd steps are the doc's first ones that must run ON the server
 # machine rather than the jumpbox. Rather than giving server its own
@@ -18,7 +19,8 @@
 # in favor of this), jumpbox stays the one orchestrator: it scp's the etcd
 # binaries and unit file over exactly like it already does for certs and
 # kubeconfigs, then ssh's in to run the remaining install/configure/start
-# commands itself, in order, right after. No race, no separate script.
+# commands itself, in order, right after. No race, no separate script. Doc
+# 08 (API server, controller manager, scheduler) follows the same shape.
 #
 # Intended to be run as root on the jumpbox instance itself (SSH in first).
 # Runs unattended via cloud-init with no console attached, so every step
@@ -391,6 +393,131 @@ verify_etcd_on_server() {
   ssh "${SSH_OPTS[@]}" root@server etcdctl member list
 }
 
+# The apiserver/controller-manager/scheduler binaries, their unit files, and
+# the two configs they need (kube-scheduler.yaml, the RBAC manifest used
+# later for kubelet access) all have to land on server before anything else
+# in this section can run.
+distribute_control_plane_binaries() {
+  scp -o StrictHostKeyChecking=accept-new \
+    downloads/controller/kube-apiserver \
+    downloads/controller/kube-controller-manager \
+    downloads/controller/kube-scheduler \
+    downloads/client/kubectl \
+    units/kube-apiserver.service \
+    units/kube-controller-manager.service \
+    units/kube-scheduler.service \
+    configs/kube-scheduler.yaml \
+    configs/kube-apiserver-to-kubelet.yaml \
+    root@server:~/
+}
+
+# kube-scheduler.yaml gets moved here later; created up front since it
+# doesn't exist on a fresh Debian install.
+create_kubernetes_config_dir_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server 'mkdir -p /etc/kubernetes/config'
+}
+
+# Same PATH convention as etcd/kubectl before it: unit files' ExecStart
+# lines expect these on /usr/local/bin.
+install_control_plane_binaries_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server '
+    mv kube-apiserver kube-controller-manager kube-scheduler kubectl \
+      /usr/local/bin/
+  '
+}
+
+# kube-apiserver.service points at /var/lib/kubernetes/ for the CA, its own
+# serving cert, the service-account signing key pair (used to mint pod
+# ServiceAccount tokens), and encryption-config.yaml (from doc 06) for
+# encrypting Secrets at rest -- all have to be in place before it can start.
+configure_kube_apiserver_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server '
+    mkdir -p /var/lib/kubernetes/
+    mv ca.crt ca.key \
+      kube-api-server.key kube-api-server.crt \
+      service-accounts.key service-accounts.crt \
+      encryption-config.yaml \
+      /var/lib/kubernetes/
+  '
+}
+
+install_kube_apiserver_unit_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server \
+    'mv kube-apiserver.service /etc/systemd/system/kube-apiserver.service'
+}
+
+# kube-controller-manager.service reads its kubeconfig (the identity it
+# authenticates to the API server as) from /var/lib/kubernetes/, same
+# directory as the apiserver's own state.
+configure_kube_controller_manager_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server '
+    mv kube-controller-manager.kubeconfig /var/lib/kubernetes/
+    mv kube-controller-manager.service /etc/systemd/system/
+  '
+}
+
+# kube-scheduler needs both its kubeconfig (identity) and kube-scheduler.yaml
+# (its own component config, referencing that kubeconfig) in place before
+# its unit file can start it.
+configure_kube_scheduler_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server '
+    mv kube-scheduler.kubeconfig /var/lib/kubernetes/
+    mv kube-scheduler.yaml /etc/kubernetes/config/
+    mv kube-scheduler.service /etc/systemd/system/
+  '
+}
+
+# All three units were just installed, so systemd needs to reread them
+# before enable/start will recognize them.
+start_control_plane_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server '
+    systemctl daemon-reload
+    systemctl enable kube-apiserver \
+      kube-controller-manager kube-scheduler
+    systemctl start kube-apiserver \
+      kube-controller-manager kube-scheduler
+  '
+}
+
+# The doc calls out that kube-apiserver can take up to 10 seconds to finish
+# initializing. Unlike the server-setup.sh timing race this script was
+# designed to avoid, this is a short, doc-specified, single-process warm-up
+# with no cross-instance boot-order uncertainty, so a fixed sleep is fine.
+wait_for_kube_apiserver_startup() {
+  sleep 10
+}
+
+# Confirms kube-apiserver actually reports active rather than just trusting
+# "systemctl start" launched it -- a bad cert/config path shows up here.
+verify_kube_apiserver_active() {
+  ssh "${SSH_OPTS[@]}" root@server systemctl is-active kube-apiserver
+}
+
+# Confirms the whole control plane (not just kube-apiserver's own process
+# state) is actually reachable and serving, using the admin identity the
+# same way an operator would.
+verify_cluster_info_on_server() {
+  ssh "${SSH_OPTS[@]}" root@server \
+    'kubectl cluster-info --kubeconfig admin.kubeconfig'
+}
+
+# Grants kube-apiserver the system:kube-apiserver-to-kubelet ClusterRole so
+# it can reach the kubelet API on each worker node (metrics, logs, exec) --
+# without this, features like `kubectl logs`/`kubectl exec` fail even
+# though the control plane itself is healthy.
+apply_kubelet_authorization_rbac() {
+  ssh "${SSH_OPTS[@]}" root@server \
+    'kubectl apply -f kube-apiserver-to-kubelet.yaml --kubeconfig admin.kubeconfig'
+}
+
+# Run from the jumpbox rather than over ssh, using the cluster's public DNS
+# name and its own copy of ca.crt -- confirms the API server is reachable
+# from outside server itself, not just over the loopback admin.kubeconfig
+# uses above.
+verify_control_plane_from_jumpbox() {
+  curl --cacert ca.crt https://server.kubernetes.local:6443/version
+}
+
 run_step "install command line utilities" install_packages
 # cloud-init runs runcmd from /, not /root, so without this the repo clones
 # to /kubernetes-the-hard-way instead of /root/kubernetes-the-hard-way.
@@ -433,3 +560,17 @@ run_step "configure etcd on server" configure_etcd_on_server
 run_step "install etcd systemd unit on server" install_etcd_unit_on_server
 run_step "start etcd on server" start_etcd_on_server
 run_step "verify etcd cluster membership" verify_etcd_on_server
+
+run_step "distribute control plane binaries and configs to server" distribute_control_plane_binaries
+run_step "create /etc/kubernetes/config on server" create_kubernetes_config_dir_on_server
+run_step "install control plane binaries on server" install_control_plane_binaries_on_server
+run_step "configure kube-apiserver on server" configure_kube_apiserver_on_server
+run_step "install kube-apiserver systemd unit on server" install_kube_apiserver_unit_on_server
+run_step "configure kube-controller-manager on server" configure_kube_controller_manager_on_server
+run_step "configure kube-scheduler on server" configure_kube_scheduler_on_server
+run_step "start control plane services on server" start_control_plane_on_server
+run_step "wait for kube-apiserver to initialize" wait_for_kube_apiserver_startup
+run_step "verify kube-apiserver is active" verify_kube_apiserver_active
+run_step "verify cluster-info on server" verify_cluster_info_on_server
+run_step "apply kubelet authorization RBAC" apply_kubelet_authorization_rbac
+run_step "verify control plane version from jumpbox" verify_control_plane_from_jumpbox
