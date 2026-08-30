@@ -49,13 +49,20 @@ resource "aws_instance" "machine" {
   # which needs both /root/machines.txt to loop over and this cluster's private
   # key to actually authenticate as root on those nodes -- the other 3 only
   # ever receive inbound connections, so they don't need a copy.
-  user_data = templatefile("${path.module}/cloud-init.yaml", {
+  # AWS caps user_data at 16KB raw, and the jumpbox's rendered cloud-init
+  # (setup_script + machines_txt + ssh_private_key + hosts_setup_script all
+  # embedded as write_files) grew past that once jumpbox-setup.sh picked up
+  # the doc 04/05 automation. cloud-init auto-decompresses gzip'd user-data
+  # on boot, and the 16KB limit is measured on what we actually send -- so
+  # gzipping first (this YAML is mostly comments/whitespace, which compress
+  # well) buys back headroom without changing any script content.
+  user_data_base64 = base64gzip(templatefile("${path.module}/cloud-init.yaml", {
     ssh_public_key     = trimspace(tls_private_key.ssh.public_key_openssh)
     setup_script       = fileexists("${path.module}/${each.key}-setup.sh") ? file("${path.module}/${each.key}-setup.sh") : ""
     machines_txt       = each.key == "jumpbox" ? local_file.machines_txt.content : ""
     ssh_private_key    = each.key == "jumpbox" ? tls_private_key.ssh.private_key_openssh : ""
     hosts_setup_script = each.key == "jumpbox" ? file("${path.module}/hosts-setup.sh") : ""
-  })
+  }))
 
   tags = {
     Name = each.key

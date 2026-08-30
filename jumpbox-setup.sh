@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
-# Runs the "Set Up The Jumpbox" and "Provisioning a CA and Generating TLS
-# Certificates" steps from Kubernetes The Hard Way, in order:
+# Runs the "Set Up The Jumpbox", "Provisioning a CA and Generating TLS
+# Certificates", and "Generating Kubernetes Configuration Files for
+# Authentication" steps from Kubernetes The Hard Way, in order:
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/02-jumpbox.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/04-certificate-authority.md
+# https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/05-kubernetes-configuration-files.md
 #
 # Intended to be run as root on the jumpbox instance itself (SSH in first).
 # Runs unattended via cloud-init with no console attached, so every step
@@ -165,6 +167,147 @@ distribute_server_certs() {
     root@server:~/
 }
 
+# Each kubeconfig bundles: which API server to trust (set-cluster), which
+# identity to authenticate as (set-credentials), and the pairing of the two
+# (set-context/use-context) -- all embedded so the resulting file is
+# self-contained once copied off to the node/server that uses it.
+generate_worker_kubeconfigs() {
+  for host in node-0 node-1; do
+    kubectl config set-cluster kubernetes-the-hard-way \
+      --certificate-authority=ca.crt \
+      --embed-certs=true \
+      --server=https://server.kubernetes.local:6443 \
+      --kubeconfig="${host}.kubeconfig"
+
+    kubectl config set-credentials "system:node:${host}" \
+      --client-certificate="${host}.crt" \
+      --client-key="${host}.key" \
+      --embed-certs=true \
+      --kubeconfig="${host}.kubeconfig"
+
+    kubectl config set-context default \
+      --cluster=kubernetes-the-hard-way \
+      --user="system:node:${host}" \
+      --kubeconfig="${host}.kubeconfig"
+
+    kubectl config use-context default \
+      --kubeconfig="${host}.kubeconfig"
+  done
+}
+
+generate_kube_proxy_kubeconfig() {
+  kubectl config set-cluster kubernetes-the-hard-way \
+    --certificate-authority=ca.crt \
+    --embed-certs=true \
+    --server=https://server.kubernetes.local:6443 \
+    --kubeconfig=kube-proxy.kubeconfig
+
+  kubectl config set-credentials system:kube-proxy \
+    --client-certificate=kube-proxy.crt \
+    --client-key=kube-proxy.key \
+    --embed-certs=true \
+    --kubeconfig=kube-proxy.kubeconfig
+
+  kubectl config set-context default \
+    --cluster=kubernetes-the-hard-way \
+    --user=system:kube-proxy \
+    --kubeconfig=kube-proxy.kubeconfig
+
+  kubectl config use-context default \
+    --kubeconfig=kube-proxy.kubeconfig
+}
+
+generate_kube_controller_manager_kubeconfig() {
+  kubectl config set-cluster kubernetes-the-hard-way \
+    --certificate-authority=ca.crt \
+    --embed-certs=true \
+    --server=https://server.kubernetes.local:6443 \
+    --kubeconfig=kube-controller-manager.kubeconfig
+
+  kubectl config set-credentials system:kube-controller-manager \
+    --client-certificate=kube-controller-manager.crt \
+    --client-key=kube-controller-manager.key \
+    --embed-certs=true \
+    --kubeconfig=kube-controller-manager.kubeconfig
+
+  kubectl config set-context default \
+    --cluster=kubernetes-the-hard-way \
+    --user=system:kube-controller-manager \
+    --kubeconfig=kube-controller-manager.kubeconfig
+
+  kubectl config use-context default \
+    --kubeconfig=kube-controller-manager.kubeconfig
+}
+
+generate_kube_scheduler_kubeconfig() {
+  kubectl config set-cluster kubernetes-the-hard-way \
+    --certificate-authority=ca.crt \
+    --embed-certs=true \
+    --server=https://server.kubernetes.local:6443 \
+    --kubeconfig=kube-scheduler.kubeconfig
+
+  kubectl config set-credentials system:kube-scheduler \
+    --client-certificate=kube-scheduler.crt \
+    --client-key=kube-scheduler.key \
+    --embed-certs=true \
+    --kubeconfig=kube-scheduler.kubeconfig
+
+  kubectl config set-context default \
+    --cluster=kubernetes-the-hard-way \
+    --user=system:kube-scheduler \
+    --kubeconfig=kube-scheduler.kubeconfig
+
+  kubectl config use-context default \
+    --kubeconfig=kube-scheduler.kubeconfig
+}
+
+# Points at 127.0.0.1 instead of server.kubernetes.local: this kubeconfig is
+# meant to be used from the server node itself (kube-controller-manager and
+# kube-scheduler run there too), not shipped to a remote client, so it talks
+# to the local kube-apiserver directly -- still validated by ca.crt since
+# 127.0.0.1 is one of kube-api-server.crt's SANs.
+generate_admin_kubeconfig() {
+  kubectl config set-cluster kubernetes-the-hard-way \
+    --certificate-authority=ca.crt \
+    --embed-certs=true \
+    --server=https://127.0.0.1:6443 \
+    --kubeconfig=admin.kubeconfig
+
+  kubectl config set-credentials admin \
+    --client-certificate=admin.crt \
+    --client-key=admin.key \
+    --embed-certs=true \
+    --kubeconfig=admin.kubeconfig
+
+  kubectl config set-context default \
+    --cluster=kubernetes-the-hard-way \
+    --user=admin \
+    --kubeconfig=admin.kubeconfig
+
+  kubectl config use-context default \
+    --kubeconfig=admin.kubeconfig
+}
+
+distribute_worker_kubeconfigs() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" mkdir -p /var/lib/{kube-proxy,kubelet}
+
+    scp -o StrictHostKeyChecking=accept-new kube-proxy.kubeconfig \
+      "root@${host}:/var/lib/kube-proxy/kubeconfig"
+
+    scp -o StrictHostKeyChecking=accept-new "${host}.kubeconfig" \
+      "root@${host}:/var/lib/kubelet/kubeconfig"
+  done
+}
+
+distribute_control_kubeconfigs() {
+  scp -o StrictHostKeyChecking=accept-new \
+    admin.kubeconfig \
+    kube-controller-manager.kubeconfig \
+    kube-scheduler.kubeconfig \
+    root@server:~/
+}
+
 run_step "install command line utilities" install_packages
 # cloud-init runs runcmd from /, not /root, so without this the repo clones
 # to /kubernetes-the-hard-way instead of /root/kubernetes-the-hard-way.
@@ -188,3 +331,11 @@ run_step "generate certificate authority" generate_ca
 run_step "generate and sign component certificates" generate_certs
 run_step "distribute certs to node-0 and node-1" distribute_worker_certs
 run_step "distribute certs to server" distribute_server_certs
+
+run_step "generate node-0 and node-1 kubeconfigs" generate_worker_kubeconfigs
+run_step "generate kube-proxy kubeconfig" generate_kube_proxy_kubeconfig
+run_step "generate kube-controller-manager kubeconfig" generate_kube_controller_manager_kubeconfig
+run_step "generate kube-scheduler kubeconfig" generate_kube_scheduler_kubeconfig
+run_step "generate admin kubeconfig" generate_admin_kubeconfig
+run_step "distribute kubeconfigs to node-0 and node-1" distribute_worker_kubeconfigs
+run_step "distribute kubeconfigs to server" distribute_control_kubeconfigs
