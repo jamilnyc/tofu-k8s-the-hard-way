@@ -11,6 +11,7 @@
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/06-data-encryption-keys.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/07-bootstrapping-etcd.md
 # https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/08-bootstrapping-kubernetes-controllers.md
+# https://github.com/kelseyhightower/kubernetes-the-hard-way/blob/master/docs/09-bootstrapping-kubernetes-workers.md
 #
 # The etcd steps are the doc's first ones that must run ON the server
 # machine rather than the jumpbox. Rather than giving server its own
@@ -20,7 +21,8 @@
 # binaries and unit file over exactly like it already does for certs and
 # kubeconfigs, then ssh's in to run the remaining install/configure/start
 # commands itself, in order, right after. No race, no separate script. Doc
-# 08 (API server, controller manager, scheduler) follows the same shape.
+# 08 (API server, controller manager, scheduler) follows the same shape,
+# and so does doc 09 (worker nodes) -- just looped over node-0/node-1.
 #
 # Intended to be run as root on the jumpbox instance itself (SSH in first).
 # Runs unattended via cloud-init with no console attached, so every step
@@ -518,6 +520,190 @@ verify_control_plane_from_jumpbox() {
   curl --cacert ca.crt https://server.kubernetes.local:6443/version
 }
 
+# The bridge CNI config and kubelet config are per-host: each worker gets
+# its own slice of the pod CIDR range from machines.txt (field 4), so the
+# SUBNET placeholder in each template has to be filled in before that
+# host's copy is sent -- sed re-renders both files fresh on every loop
+# iteration so node-0 and node-1 never get each other's subnet.
+distribute_worker_node_configs() {
+  for host in node-0 node-1; do
+    local subnet
+    subnet=$(grep "${host}" machines.txt | cut -d " " -f 4)
+
+    sed "s|SUBNET|${subnet}|g" configs/10-bridge.conf >10-bridge.conf
+    sed "s|SUBNET|${subnet}|g" configs/kubelet-config.yaml >kubelet-config.yaml
+
+    scp -o StrictHostKeyChecking=accept-new 10-bridge.conf kubelet-config.yaml \
+      "root@${host}:~/"
+  done
+}
+
+# Everything else a worker needs that *isn't* per-host: the runc/kubelet/
+# kube-proxy/containerd binaries, kubectl, the remaining (non-templated)
+# CNI/containerd/kube-proxy configs, and all three unit files.
+distribute_worker_binaries() {
+  for host in node-0 node-1; do
+    scp -o StrictHostKeyChecking=accept-new \
+      downloads/worker/* \
+      downloads/client/kubectl \
+      configs/99-loopback.conf \
+      configs/containerd-config.toml \
+      configs/kube-proxy-config.yaml \
+      units/containerd.service \
+      units/kubelet.service \
+      units/kube-proxy.service \
+      "root@${host}:~/"
+  done
+}
+
+# Shipped into their own subdirectory (rather than $HOME alongside
+# everything else above) since install_worker_binaries below needs to
+# `mv cni-plugins/*` as one glob into /opt/cni/bin/.
+distribute_worker_cni_plugins() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" mkdir -p cni-plugins
+
+    scp -o StrictHostKeyChecking=accept-new downloads/cni-plugins/* \
+      "root@${host}:~/cni-plugins/"
+  done
+}
+
+# socat is what makes `kubectl port-forward` work; conntrack/ipset are
+# runtime dependencies of kube-proxy's iptables rules; kmod provides
+# modprobe, needed below to load br-netfilter.
+install_worker_os_dependencies() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" '
+      apt-get update
+      apt-get -y install socat conntrack ipset kmod
+    '
+  done
+}
+
+# Kubernetes can't reliably account for pod memory usage if swap is in
+# play, so it's turned off outright rather than conditionally checked --
+# swapoff -a is already a no-op on a host where swap is off.
+disable_swap_on_workers() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" swapoff -a
+  done
+}
+
+# None of these exist on a fresh Debian install; every subsequent step on
+# the worker (CNI config, binaries, kubelet/kube-proxy state) writes into
+# one of these.
+create_worker_install_dirs() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" '
+      mkdir -p \
+        /etc/cni/net.d \
+        /opt/cni/bin \
+        /var/lib/kubelet \
+        /var/lib/kube-proxy \
+        /var/lib/kubernetes \
+        /var/run/kubernetes
+    '
+  done
+}
+
+# Same PATH convention used on server: crictl/kube-proxy/kubelet/runc go to
+# /usr/local/bin; containerd's own pieces are installed to /bin instead,
+# matching where its unit file and upstream tarball expect them; the CNI
+# plugin binaries move out of the staging subdirectory from the distribute
+# step above into the path containerd's CNI config points at.
+install_worker_binaries() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" '
+      mv crictl kube-proxy kubelet runc /usr/local/bin/
+      mv containerd containerd-shim-runc-v2 containerd-stress /bin/
+      mv cni-plugins/* /opt/cni/bin/
+    '
+  done
+}
+
+# Installs the per-host bridge config generated above plus the (identical
+# on every host) loopback config, then loads br-netfilter and flips the two
+# sysctls that make iptables actually see bridged traffic -- without this,
+# traffic crossing the CNI bridge bypasses kube-proxy's iptables rules
+# entirely.
+configure_cni_networking_on_workers() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" '
+      mv 10-bridge.conf 99-loopback.conf /etc/cni/net.d/
+      modprobe br-netfilter
+      echo "br-netfilter" >> /etc/modules-load.d/modules.conf
+      echo "net.bridge.bridge-nf-call-iptables = 1" \
+        >> /etc/sysctl.d/kubernetes.conf
+      echo "net.bridge.bridge-nf-call-ip6tables = 1" \
+        >> /etc/sysctl.d/kubernetes.conf
+      sysctl -p /etc/sysctl.d/kubernetes.conf
+    '
+  done
+}
+
+# containerd.service points at /etc/containerd/config.toml by convention;
+# the file shipped over is named containerd-config.toml specifically so it
+# can't be confused with that final path while still in transit.
+configure_containerd_on_workers() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" '
+      mkdir -p /etc/containerd/
+      mv containerd-config.toml /etc/containerd/config.toml
+      mv containerd.service /etc/systemd/system/
+    '
+  done
+}
+
+# kubelet-config.yaml (already carrying this host's subnet from the
+# distribute step above) is what kubelet.service's ExecStart references
+# for its --config flag.
+configure_kubelet_on_workers() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" '
+      mv kubelet-config.yaml /var/lib/kubelet/
+      mv kubelet.service /etc/systemd/system/
+    '
+  done
+}
+
+configure_kube_proxy_on_workers() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" '
+      mv kube-proxy-config.yaml /var/lib/kube-proxy/
+      mv kube-proxy.service /etc/systemd/system/
+    '
+  done
+}
+
+# All three units were just installed, so systemd needs to reread them
+# before enable/start recognizes them -- same daemon-reload pattern used
+# for etcd and the control plane services on server.
+start_worker_services() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" '
+      systemctl daemon-reload
+      systemctl enable containerd kubelet kube-proxy
+      systemctl start containerd kubelet kube-proxy
+    '
+  done
+}
+
+# Confirms kubelet actually came up on each worker rather than trusting
+# "systemctl start" launched it -- same reasoning as verify_kube_apiserver_active.
+verify_kubelet_active_on_workers() {
+  for host in node-0 node-1; do
+    ssh "${SSH_OPTS[@]}" "root@${host}" systemctl is-active kubelet
+  done
+}
+
+# The real end-to-end check: confirms the kubelets on node-0/node-1 have
+# actually registered themselves with the API server on server and report
+# Ready, not just that their local systemd units are active.
+verify_worker_nodes_registered() {
+  ssh "${SSH_OPTS[@]}" root@server \
+    'kubectl get nodes --kubeconfig admin.kubeconfig'
+}
+
 run_step "install command line utilities" install_packages
 # cloud-init runs runcmd from /, not /root, so without this the repo clones
 # to /kubernetes-the-hard-way instead of /root/kubernetes-the-hard-way.
@@ -574,3 +760,18 @@ run_step "verify kube-apiserver is active" verify_kube_apiserver_active
 run_step "verify cluster-info on server" verify_cluster_info_on_server
 run_step "apply kubelet authorization RBAC" apply_kubelet_authorization_rbac
 run_step "verify control plane version from jumpbox" verify_control_plane_from_jumpbox
+
+run_step "distribute per-host worker configs" distribute_worker_node_configs
+run_step "distribute worker binaries and configs" distribute_worker_binaries
+run_step "distribute CNI plugins to workers" distribute_worker_cni_plugins
+run_step "install worker OS dependencies" install_worker_os_dependencies
+run_step "disable swap on workers" disable_swap_on_workers
+run_step "create worker installation directories" create_worker_install_dirs
+run_step "install worker binaries" install_worker_binaries
+run_step "configure CNI networking on workers" configure_cni_networking_on_workers
+run_step "configure containerd on workers" configure_containerd_on_workers
+run_step "configure kubelet on workers" configure_kubelet_on_workers
+run_step "configure kube-proxy on workers" configure_kube_proxy_on_workers
+run_step "start worker services" start_worker_services
+run_step "verify kubelet is active on workers" verify_kubelet_active_on_workers
+run_step "verify worker nodes registered with cluster" verify_worker_nodes_registered
